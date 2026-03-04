@@ -37,12 +37,12 @@ Link to site: https://kcarlos57.github.io/SimpleDither/
 - **Invert** — swap black and white output pixels
 - **Dot size** — Bayer matrix size (2, 4, 8, 16) for ordered dithering
 - **Dark / light colour** — replace black and white pixels with custom colours
-- **Gradient tint** — diagonal two-colour gradient composited over the result
+- **Gradient tint** — diagonal two-colour gradient composited over the result with adjustable opacity
 
 ### Pre-process popup
 - **Brightness** — offset applied before dithering
 - **Blur** — Gaussian blur via CSS canvas filter, softens edges before the algorithm runs
-- **Zoom / crop** — crops from centre before dithering
+- **Zoom / crop** — values above 1 crop into the centre of the image; values below 1 zoom out, padding with black
 
 ### Output popup
 - **Export resolution** — 1×, 2×, or 4× upscale of the saved PNG
@@ -50,10 +50,18 @@ Link to site: https://kcarlos57.github.io/SimpleDither/
 - **Copy to clipboard** — writes the canvas as a PNG blob via the Clipboard API
 
 ### Creative popup
-- **Scanlines** — draws semi-transparent horizontal lines every 2px (CRT effect)
+- **Scanlines** — draws semi-transparent horizontal lines every 2px (CRT effect) with adjustable intensity
 - **Tile mode** — repeats the dithered image as a tiling pattern
 - **Animate threshold** — continuously sweeps the threshold value between ~38–218 using `requestAnimationFrame`
 - **Reseed noise** — picks a new seed for the Mulberry32 PRNG, changing the noise pattern
+
+### Panel controls
+- **⛶ drag handle** (top-left) — click and drag to reposition the panel anywhere on screen; touch supported
+- **⊠ hide button** (top-right of panel) — fades the entire panel out for a clean screenshot; a small floating button appears in the screen corner to restore it
+- **? info button** (top-right of panel) — opens a side popup with plain-language descriptions of each algorithm and core slider
+- **fill / fit toggle** (bottom row) — switches the background display between two modes:
+  - **fill** — stretches the dithered result to cover the full screen
+  - **fit** — scales the image down to fit entirely within the screen with black bars on the short axis, preserving aspect ratio; useful for checking what the saved file will look like before downloading
 
 ---
 
@@ -67,13 +75,13 @@ All HTML, CSS, and JavaScript lives in one `.html` file. This is an intentional 
 
 Dithering is performed on a hidden off-screen `<canvas>` element (`#work`). The pipeline on each render is:
 
-1. Draw the source image to the scratch canvas at reduced resolution (scale ÷ zoom)
+1. Draw the source image to the scratch canvas at working resolution (original size ÷ scale, adjusted for zoom)
 2. Read pixel data with `getImageData()`
 3. Convert each pixel to greyscale using the standard luminance weights (`0.299R + 0.587G + 0.114B`)
 4. Apply brightness offset and contrast curve
 5. Run the selected dithering algorithm over the greyscale float array
 6. Write the result back via `putImageData()`
-7. Draw the scratch canvas to the full-screen `#bg-canvas`, scaled up with `imageSmoothingEnabled = false`
+7. Draw the scratch canvas to the full-screen `#bg-canvas` (stretched in fill mode, letterboxed in fit mode) with `imageSmoothingEnabled = false`
 8. Composite tint gradient and scanlines on top
 
 All pixel data is handled as typed arrays (`Float32Array` for greyscale, `Uint8ClampedArray` for output RGBA) for performance.
@@ -88,6 +96,10 @@ JavaScript's `Math.random()` cannot be seeded, so the noise pattern would change
 
 ### Save / export
 
-Saving works by rendering the dithered result at the original input image's native resolution (× export multiplier) into a temporary off-screen canvas, then converting it to a PNG data URL and triggering a download via a programmatic anchor click. The saved dimensions always match the input image — the scale slider affects visual coarseness, not output size.
+The save function re-runs the full dithering pipeline at the output resolution rather than upscaling the existing screen preview. This ensures the saved PNG faithfully matches the on-screen result regardless of monitor size or display mode. Output dimensions always match the original input image (× export multiplier) — the scale slider affects dot coarseness, not file dimensions.
+
+### Fit mode
+
+In fit mode, the background canvas is filled with solid black before drawing, then the dithered result is drawn centred and scaled to fit within the screen bounds. Tint and scanlines are clipped to the image rectangle so the black letterbox bars stay clean. This mode is primarily useful for previewing exact dot density before saving.
 
 ---
