@@ -6,7 +6,7 @@ A single-file, zero-dependency browser tool for dithering images. Upload a photo
 
 ## Usage
 
-Download `dither.html` and open it in any modern browser. That's it.
+Download `index.html` and open it in any modern browser. That's it.
 
 ```
 open dither.html
