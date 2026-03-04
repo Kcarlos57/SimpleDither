@@ -63,8 +63,47 @@ html,body{width:100%;height:100%;background:var(--bg);overflow:hidden;font-famil
   width:320px;padding:30px 26px 24px;
   background:var(--panel);border:1px solid var(--border);
   backdrop-filter:blur(28px) saturate(1.3);-webkit-backdrop-filter:blur(28px) saturate(1.3);
-  border-radius:2px;display:flex;flex-direction:column;gap:20px;position:relative;
+  border-radius:2px;display:flex;flex-direction:column;gap:20px;position:absolute;
+  user-select:none;
 }
+.panel.dragging{ opacity:.92; }
+
+/* The drag handle and info button sit in the panel's top corners */
+.panel-chrome{
+  position:absolute;top:10px;left:0;right:0;
+  display:flex;justify-content:space-between;align-items:center;
+  padding:0 12px;pointer-events:none;
+}
+.drag-handle{
+  cursor:grab;pointer-events:all;color:var(--muted);
+  transition:color .15s;line-height:1;padding:2px;
+}
+.drag-handle:active{ cursor:grabbing; }
+.drag-handle:hover{ color:var(--accent); }
+.info-btn{
+  cursor:pointer;pointer-events:all;color:var(--muted);
+  background:transparent;border:none;font-family:'DM Mono',monospace;
+  font-size:11px;line-height:1;padding:2px 3px;transition:color .15s;
+}
+.info-btn:hover{ color:var(--accent); }
+
+/* Info popup — appears to the right side of the panel */
+.info-popup{
+  position:absolute;left:calc(100% + 10px);top:0;width:260px;
+  background:var(--popup);border:1px solid var(--border2);
+  backdrop-filter:blur(32px);-webkit-backdrop-filter:blur(32px);
+  border-radius:2px;padding:18px 18px 16px;
+  display:none;flex-direction:column;gap:11px;z-index:200;
+}
+.info-popup.open{ display:flex; }
+.info-popup h3{
+  font-family:'Unbounded',sans-serif;font-weight:200;
+  font-size:9px;letter-spacing:.3em;text-transform:uppercase;color:var(--muted);
+  padding-bottom:8px;border-bottom:1px solid var(--border);
+}
+.info-row{ display:flex;flex-direction:column;gap:3px; }
+.info-term{ font-size:8px;letter-spacing:.2em;text-transform:uppercase;color:var(--accent); }
+.info-desc{ font-size:8px;letter-spacing:.04em;color:var(--muted);line-height:1.7; }
 
 .wordmark{font-family:'Unbounded',sans-serif;font-weight:200;font-size:11px;letter-spacing:.35em;text-transform:uppercase;color:var(--muted);text-align:center;}
 
@@ -218,6 +257,23 @@ canvas#work{display:none}
 <!-- Layer 2: the UI — everything the user sees and touches. -->
 <div class="ui">
 <div class="panel" id="panel">
+
+  <!-- Chrome: drag handle (top-left) and info button (top-right) -->
+  <div class="panel-chrome">
+    <span class="drag-handle" id="drag-handle" title="Move panel">⛶</span>
+    <button class="info-btn" id="info-btn" title="About Simple Dither">?</button>
+  </div>
+
+  <!-- Info popup -->
+  <div class="info-popup" id="info-popup">
+    <h3>Simple Dither</h3>
+    <div class="info-row"><span class="info-term">Ordered</span><span class="info-desc">Uses a Bayer grid (like a halftone screen) to decide which pixels go black or white. Gives a regular, geometric dot pattern.</span></div>
+    <div class="info-row"><span class="info-term">Floyd-Steinberg</span><span class="info-desc">Spreads rounding errors to neighbouring pixels. Produces smooth, organic-looking results with no visible grid.</span></div>
+    <div class="info-row"><span class="info-term">Atkinson</span><span class="info-desc">Apple's 1984 Mac algorithm. Like Floyd-Steinberg but crisper and slightly lighter — absorbs some error rather than diffusing all of it.</span></div>
+    <div class="info-row"><span class="info-term">Threshold</span><span class="info-desc">The brightness cut-off between black and white. Lower = more white pixels; higher = more black.</span></div>
+    <div class="info-row"><span class="info-term">Scale</span><span class="info-desc">Downsamples the image before dithering. Higher values give larger, blockier pixels. This is the main lever for coarseness.</span></div>
+    <div class="info-row"><span class="info-term">Noise</span><span class="info-desc">Adds random jitter before dithering. Breaks up repetitive patterns and adds a grainy, organic texture.</span></div>
+  </div>
 
   <div class="wordmark">Simple Dither</div>
 
@@ -543,7 +599,7 @@ document.querySelectorAll('.popup-trigger').forEach(btn => {
 document.addEventListener('click', e => { if(!e.target.closest('#panel')) closePopups(); });
 
 function closePopups(){
-  document.querySelectorAll('.popup').forEach(p => p.classList.remove('open'));
+  document.querySelectorAll('.popup, .info-popup').forEach(p => p.classList.remove('open'));
   document.querySelectorAll('.popup-trigger').forEach(b => b.classList.remove('open'));
 }
 
@@ -1019,6 +1075,74 @@ function mulberry32(seed){
 // always fills the new dimensions correctly.
 window.addEventListener('resize', () => {
   if(currentImage && !togAnimate.checked) doRender(gsl('threshold'));
+});
+
+// ─── 18. PANEL DRAGGING ──────────────────────────────────────────────────────
+// Makes the control panel movable. We track where the mouse was when dragging
+// started, then update the panel's position on every mousemove.
+const panel      = document.getElementById('panel');
+const dragHandle = document.getElementById('drag-handle');
+
+// Centre the panel initially.
+(function initPanelPos(){
+  const r = panel.getBoundingClientRect();
+  panel.style.left = ((window.innerWidth  - r.width)  / 2) + 'px';
+  panel.style.top  = ((window.innerHeight - r.height) / 2) + 'px';
+})();
+
+let dragging = false, dragOffX = 0, dragOffY = 0;
+
+dragHandle.addEventListener('mousedown', e => {
+  dragging = true;
+  const r = panel.getBoundingClientRect();
+  // Offset = where within the panel the user grabbed it.
+  dragOffX = e.clientX - r.left;
+  dragOffY = e.clientY - r.top;
+  panel.classList.add('dragging');
+  e.preventDefault();
+});
+
+// Touch support for mobile.
+dragHandle.addEventListener('touchstart', e => {
+  dragging = true;
+  const r   = panel.getBoundingClientRect();
+  const t   = e.touches[0];
+  dragOffX  = t.clientX - r.left;
+  dragOffY  = t.clientY - r.top;
+  panel.classList.add('dragging');
+  e.preventDefault();
+}, { passive: false });
+
+document.addEventListener('mousemove', e => {
+  if(!dragging) return;
+  movePanelTo(e.clientX, e.clientY);
+});
+document.addEventListener('touchmove', e => {
+  if(!dragging) return;
+  movePanelTo(e.touches[0].clientX, e.touches[0].clientY);
+}, { passive: false });
+
+document.addEventListener('mouseup',  () => { dragging = false; panel.classList.remove('dragging'); });
+document.addEventListener('touchend', () => { dragging = false; panel.classList.remove('dragging'); });
+
+function movePanelTo(cx, cy){
+  const r = panel.getBoundingClientRect();
+  // Clamp so the panel can't be dragged fully off-screen.
+  const x = Math.max(0, Math.min(window.innerWidth  - r.width,  cx - dragOffX));
+  const y = Math.max(0, Math.min(window.innerHeight - r.height, cy - dragOffY));
+  panel.style.left = x + 'px';
+  panel.style.top  = y + 'px';
+}
+
+// ─── 19. INFO POPUP ──────────────────────────────────────────────────────────
+const infoBtn   = document.getElementById('info-btn');
+const infoPopup = document.getElementById('info-popup');
+
+infoBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  const isOpen = infoPopup.classList.contains('open');
+  closePopups(); // close any other open popups first
+  if(!isOpen) infoPopup.classList.add('open');
 });
 </script>
 </body>
