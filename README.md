@@ -9,7 +9,7 @@ A single-file, zero-dependency browser tool for dithering images. Upload a photo
 Download `index.html` and open it in any modern browser. That's it.
 
 ```
-open dither.html
+open index.html
 ```
 
 Link to site: https://kcarlos57.github.io/SimpleDither/
