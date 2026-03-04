@@ -54,7 +54,7 @@ html,body{width:100%;height:100%;background:var(--bg);overflow:hidden;font-famil
 
 /* The outer container that centres the control panel on screen.
    'display:flex' with align/justify center is the easiest way to do this. */
-.ui{position:fixed;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;}
+.ui{position:fixed;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;transition:opacity .25s ease;}
 
 /* The frosted-glass control panel.
    'backdrop-filter: blur' creates the frosted glass effect by blurring
@@ -86,6 +86,32 @@ html,body{width:100%;height:100%;background:var(--bg);overflow:hidden;font-famil
   font-size:11px;line-height:1;padding:2px 3px;transition:color .15s;
 }
 .info-btn:hover{ color:var(--accent); }
+
+.hide-btn{
+  cursor:pointer;pointer-events:all;color:var(--muted);
+  background:transparent;border:none;font-family:'DM Mono',monospace;
+  font-size:11px;line-height:1;padding:2px 3px;transition:color .15s;
+  margin-right:2px;
+}
+.hide-btn:hover{ color:var(--accent); }
+
+/* Floating restore button — visible only when panel is hidden */
+#restore-btn{
+  position:fixed;top:14px;right:14px;z-index:999;
+  padding:6px 10px;
+  background:rgba(10,10,10,0.7);
+  border:1px solid rgba(255,255,255,0.12);
+  border-radius:2px;
+  color:var(--muted);
+  font-family:'DM Mono',monospace;font-size:8px;letter-spacing:.2em;text-transform:uppercase;
+  cursor:pointer;
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  transition:color .15s,border-color .15s,opacity .3s;
+  display:none;
+  opacity:0;
+}
+#restore-btn.visible{ display:block; opacity:1; }
+#restore-btn:hover{ color:var(--accent);border-color:rgba(255,255,255,.35); }
 
 /* Info popup — appears to the right side of the panel */
 .info-popup{
@@ -225,7 +251,16 @@ input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;bac
 /* A hidden off-screen canvas used as a scratch pad for pixel processing.
    All the dithering math happens here before the result is painted to
    the visible background canvas. */
-canvas#work{display:none}
+/* Fit/fill toggle button */
+.fit-btn{
+  padding:8px 11px;background:transparent;
+  border:1px solid rgba(255,255,255,.14);border-radius:1px;
+  color:var(--muted);font-family:'DM Mono',monospace;font-size:8px;
+  letter-spacing:.2em;text-transform:uppercase;cursor:pointer;
+  transition:background .14s,border-color .14s,color .14s;white-space:nowrap;
+}
+.fit-btn:hover{background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.3);color:var(--accent)}
+.fit-btn.active{border-color:rgba(255,255,255,.35);color:var(--accent);background:rgba(255,255,255,.06)}
 </style>
 </head>
 <body>
@@ -258,10 +293,13 @@ canvas#work{display:none}
 <div class="ui">
 <div class="panel" id="panel">
 
-  <!-- Chrome: drag handle (top-left) and info button (top-right) -->
+  <!-- Chrome: drag handle (top-left) and hide+info buttons (top-right) -->
   <div class="panel-chrome">
     <span class="drag-handle" id="drag-handle" title="Move panel">⛶</span>
-    <button class="info-btn" id="info-btn" title="About Simple Dither">?</button>
+    <span style="display:flex;align-items:center;gap:2px;pointer-events:all">
+      <button class="hide-btn" id="hide-btn" title="Hide panel to screenshot">⊠</button>
+      <button class="info-btn" id="info-btn" title="About Simple Dither">?</button>
+    </span>
   </div>
 
   <!-- Info popup -->
@@ -371,7 +409,7 @@ canvas#work{display:none}
       </div>
       <div class="slider-row">
         <div class="slider-meta"><span class="slider-name">zoom / crop</span><span class="slider-val" id="v-zoom">1.0×</span></div>
-        <input type="range" id="sl-zoom" min="1" max="4" value="1" step="0.05">
+        <input type="range" id="sl-zoom" min="0.1" max="4" value="1" step="0.05">
       </div>
     </div>
 
@@ -419,14 +457,18 @@ canvas#work{display:none}
 
   </div><!-- /popup-row -->
 
-  <!-- Status message + Save button -->
+  <!-- Status message + fit/fill toggle + Save button -->
   <div class="bottom-row">
     <span class="status" id="status">awaiting image</span>
+    <button class="fit-btn" id="fit-btn" title="Toggle fit / fill display">fill</button>
     <button class="save-btn" id="save-btn" disabled>save</button>
   </div>
 
 </div><!-- /panel -->
 </div><!-- /ui -->
+
+<!-- Floating restore button — only visible when the panel is hidden -->
+<button id="restore-btn">⊞ show</button>
 
 <script>
 /*
@@ -473,6 +515,7 @@ let animThresh   = 128;       // current threshold value during animation
 let noiseSeed    = Math.random(); // a random starting point for the noise pattern
 let exportRes    = 1;         // export multiplier: 1 = screen size, 2 = double, 4 = quadruple
 let bayerSize    = 8;         // the ordered dithering grid size (2, 4, 8, or 16)
+let fitMode      = false;     // false = stretch to fill screen; true = letterbox at native pixel size
 
 
 // ─── 3. BAYER MATRICES ───────────────────────────────────────────────────────
@@ -762,29 +805,113 @@ function stopAnim(){
 
 // ─── 13. SAVE ────────────────────────────────────────────────────────────────
 /*
-  Saving works by creating a fresh off-screen canvas at the desired export size,
-  drawing the dithered result onto it (scaled up if exportRes > 1), then converting
-  the canvas to a PNG data URL and triggering a fake anchor-link click to download it.
+  Previously, save just upscaled the already-dithered low-res work canvas to the
+  output size. This caused a big mismatch: the screen stretches that same canvas
+  across your whole monitor (making pixels huge and dark), while the saved file
+  stretches it to the smaller image dimensions (making pixels tiny and light).
+
+  The fix: re-run the full dithering pipeline at the output resolution, so the
+  saved result faithfully matches what you see on screen.
 */
 saveBtn.addEventListener('click', () => {
   if(!currentImage) return;
-  // Output dimensions match the original input image exactly (times the export
-  // resolution multiplier). The dithered 'work' canvas is scaled back up to fill
-  // this — so a scale-4 render will look blocky at full size, as expected.
+
   const ow = currentImage.width  * exportRes;
   const oh = currentImage.height * exportRes;
 
-  // Create the export canvas at the right size (not attached to the page).
+  // Gather current settings — identical to doRender().
+  const scale       = gsl('scale');
+  const contrast    = gsl('contrast');
+  const noise       = gsl('noise');
+  const brightness  = gsl('brightness');
+  const blurVal     = gsl('blur');
+  const zoom        = gsl('zoom');
+  const threshold   = gsl('threshold');
+  const invert      = togInvert.checked;
+  const transparent = togTransparent.checked;
+  const [dR,dG,dB]  = h2rgb(colDark.value);
+  const [lR,lG,lB]  = h2rgb(colLight.value);
+
+  // Working size: output dimensions divided by scale — same coarseness as
+  // the screen preview, but calculated relative to the full output size.
+  const sw = Math.max(1, Math.floor(ow / scale));
+  const sh = Math.max(1, Math.floor(oh / scale));
+
+  // Draw the source image at working resolution into a temporary scratch canvas.
+  const scratch    = Object.assign(document.createElement('canvas'), {width:sw, height:sh});
+  const scratchCtx = scratch.getContext('2d');
+  if(blurVal > 0) scratchCtx.filter = `blur(${blurVal}px)`; else scratchCtx.filter = 'none';
+  const iw = currentImage.width, ih = currentImage.height;
+  const cw = iw / zoom, ch = ih / zoom;
+  scratchCtx.drawImage(currentImage, (iw-cw)/2, (ih-ch)/2, cw, ch, 0, 0, sw, sh);
+  scratchCtx.filter = 'none';
+
+  // Greyscale + brightness + contrast.
+  const imgd = scratchCtx.getImageData(0, 0, sw, sh).data;
+  const gray  = new Float32Array(sw * sh);
+  for(let i = 0; i < sw*sh; i++){
+    let lum = 0.299*imgd[i*4] + 0.587*imgd[i*4+1] + 0.114*imgd[i*4+2];
+    lum = Math.max(0, Math.min(255, lum + brightness*2.55));
+    if(contrast !== 0) lum = adjContrast(lum, contrast*2.55);
+    gray[i] = lum;
+  }
+
+  // Dithering — same algorithm branches as doRender().
+  const bayer = BAYER[bayerSize], bMax = bayerSize * bayerSize;
+  const out   = new Uint8ClampedArray(sw * sh * 4);
+  const rng   = mulberry32(noiseSeed * 2**32 | 0);
+
+  if(algo === 'ordered'){
+    for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+      const i=y*sw+x;
+      const bv=(bayer[(y%bayerSize)*bayerSize+(x%bayerSize)]/bMax)*255;
+      const n=noise>0?(rng()-.5)*noise:0;
+      let v=(gray[i]+n)>(threshold-128+bv)?255:0;
+      if(invert) v=255-v;
+      const [r,g,b]=v===0?[dR,dG,dB]:[lR,lG,lB];
+      out[i*4]=r;out[i*4+1]=g;out[i*4+2]=b;
+      out[i*4+3]=transparent?(v===0?255:0):255;
+    }
+  } else if(algo==='floyd'){
+    const g=gray.slice();
+    for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+      const i=y*sw+x;
+      const old=g[i]+(noise>0?(rng()-.5)*noise:0);
+      let nv=old>threshold?255:0;
+      const err=old-nv; if(invert) nv=255-nv;
+      if(x+1<sw)g[i+1]+=err*7/16;
+      if(y+1<sh){if(x-1>=0)g[i+sw-1]+=err*3/16;g[i+sw]+=err*5/16;if(x+1<sw)g[i+sw+1]+=err/16;}
+      const [r,gg,b]=nv===0?[dR,dG,dB]:[lR,lG,lB];
+      out[i*4]=r;out[i*4+1]=gg;out[i*4+2]=b;
+      out[i*4+3]=transparent?(nv===0?255:0):255;
+    }
+  } else {
+    const g=gray.slice();
+    for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+      const i=y*sw+x;
+      const old=g[i]+(noise>0?(rng()-.5)*noise:0);
+      let nv=old>threshold?255:0;
+      const err=(old-nv)/8; if(invert) nv=255-nv; g[i]=nv;
+      [[x+1,y],[x+2,y],[x-1,y+1],[x,y+1],[x+1,y+1],[x,y+2]].forEach(([nx,ny])=>{
+        if(nx>=0&&nx<sw&&ny>=0&&ny<sh) g[ny*sw+nx]+=err;
+      });
+      const [r,gg,b]=nv===0?[dR,dG,dB]:[lR,lG,lB];
+      out[i*4]=r;out[i*4+1]=gg;out[i*4+2]=b;
+      out[i*4+3]=transparent?(nv===0?255:0):255;
+    }
+  }
+
+  // Write dithered pixels to scratch, then scale up to the export canvas.
+  scratchCtx.putImageData(new ImageData(out, sw, sh), 0, 0);
   const ec = Object.assign(document.createElement('canvas'), {width:ow, height:oh});
   const ex = ec.getContext('2d');
-  ex.imageSmoothingEnabled = false; // keep pixels sharp, no blurring when scaling
-  ex.drawImage(work, 0, 0, ow, oh);
+  ex.imageSmoothingEnabled = false; // pixel-perfect upscale — no softening
+  ex.drawImage(scratch, 0, 0, ow, oh);
 
-  // Apply tint and scanlines to the export canvas too.
+  // Tint and scanlines on top, matching the screen display.
   paintTint(ex, ow, oh);
   paintScanlines(ex, ow, oh);
 
-  // Programmatically click an invisible download link to trigger the save dialog.
   const a = document.createElement('a');
   a.download = 'simple-dither.png';
   a.href = ec.toDataURL('image/png');
@@ -792,7 +919,17 @@ saveBtn.addEventListener('click', () => {
 });
 
 
-// ─── 14. DEBOUNCED SCHEDULING ────────────────────────────────────────────────
+// ─── FIT / FILL TOGGLE ───────────────────────────────────────────────────────
+// "fill" (default) stretches the dithered result to cover the whole screen.
+// "fit"  centers it at 1:1 pixel scale on a black background — this matches
+// exactly what the saved PNG will look like at 100% zoom.
+const fitBtn = document.getElementById('fit-btn');
+fitBtn.addEventListener('click', () => {
+  fitMode = !fitMode;
+  fitBtn.textContent = fitMode ? 'fit' : 'fill';
+  fitBtn.classList.toggle('active', fitMode);
+  schedule();
+});
 /*
   Dithering is CPU-intensive. If we re-rendered on every single mousemove event
   while dragging a slider, the UI would stutter badly.
@@ -980,22 +1117,49 @@ function doRender(threshold){
     // ── E. Paint result to the visible background canvas ─────────────────────
     bgCanvas.width  = window.innerWidth;
     bgCanvas.height = window.innerHeight;
-    bgCtx.imageSmoothingEnabled = false; // stay sharp — no bilinear smoothing
-    bgCtx.clearRect(0, 0, bgCanvas.width, bgCanvas.height);
+    bgCtx.imageSmoothingEnabled = false;
+    // Fill with solid black first — clearRect leaves the canvas transparent,
+    // which lets any previous render bleed through the letterbox bars in fit mode.
+    bgCtx.fillStyle = '#000';
+    bgCtx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
 
     if(togTile.checked){
       // Tile mode: repeat the dithered image like a wallpaper pattern.
       bgCtx.fillStyle = bgCtx.createPattern(work, 'repeat');
       bgCtx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+    } else if(fitMode){
+      // Fit mode: scale the dithered result to fit entirely within the screen,
+      // preserving aspect ratio. The image is never cropped — black bars appear
+      // on the sides or top/bottom as needed (letterbox / pillarbox).
+      const scale2fit = Math.min(bgCanvas.width / work.width, bgCanvas.height / work.height);
+      const dw = Math.round(work.width  * scale2fit);
+      const dh = Math.round(work.height * scale2fit);
+      const dx = Math.round((bgCanvas.width  - dw) / 2);
+      const dy = Math.round((bgCanvas.height - dh) / 2);
+      bgCtx.drawImage(work, dx, dy, dw, dh);
     } else {
-      // Normal mode: stretch the result to fill the screen.
+      // Fill mode (default): stretch the result to cover the full screen.
       bgCtx.drawImage(work, 0, 0, bgCanvas.width, bgCanvas.height);
     }
 
-    // Layer the gradient tint on top.
-    paintTint(bgCtx, bgCanvas.width, bgCanvas.height);
-    // Layer the scanlines on top of that.
-    paintScanlines(bgCtx, bgCanvas.width, bgCanvas.height);
+    // Layer tint and scanlines — in fit mode only over the image area, not the black bars.
+    if(fitMode && !togTile.checked){
+      const scale2fit = Math.min(bgCanvas.width / work.width, bgCanvas.height / work.height);
+      const dw = Math.round(work.width  * scale2fit);
+      const dh = Math.round(work.height * scale2fit);
+      const dx = Math.round((bgCanvas.width  - dw) / 2);
+      const dy = Math.round((bgCanvas.height - dh) / 2);
+      bgCtx.save();
+      bgCtx.beginPath();
+      bgCtx.rect(dx, dy, dw, dh);
+      bgCtx.clip();
+      paintTint(bgCtx, bgCanvas.width, bgCanvas.height);
+      paintScanlines(bgCtx, bgCanvas.width, bgCanvas.height);
+      bgCtx.restore();
+    } else {
+      paintTint(bgCtx, bgCanvas.width, bgCanvas.height);
+      paintScanlines(bgCtx, bgCanvas.width, bgCanvas.height);
+    }
 
     // Fade the canvas and overlay in (they start at opacity 0).
     bgCanvas.classList.add('visible');
@@ -1143,6 +1307,27 @@ infoBtn.addEventListener('click', e => {
   const isOpen = infoPopup.classList.contains('open');
   closePopups(); // close any other open popups first
   if(!isOpen) infoPopup.classList.add('open');
+});
+
+// ─── 20. HIDE / RESTORE PANEL ────────────────────────────────────────────────
+// Hides the entire control panel so the user can take a clean screenshot.
+// A small floating button in the top-right corner lets them bring it back.
+const hideBtn    = document.getElementById('hide-btn');
+const restoreBtn = document.getElementById('restore-btn');
+const uiLayer    = document.querySelector('.ui');
+
+hideBtn.addEventListener('click', () => {
+  closePopups();
+  uiLayer.style.opacity    = '0';
+  uiLayer.style.pointerEvents = 'none';
+  // Small delay so the fade-out finishes before the restore button appears.
+  setTimeout(() => restoreBtn.classList.add('visible'), 200);
+});
+
+restoreBtn.addEventListener('click', () => {
+  restoreBtn.classList.remove('visible');
+  uiLayer.style.opacity    = '1';
+  uiLayer.style.pointerEvents = '';
 });
 </script>
 </body>
