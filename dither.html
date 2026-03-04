@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Simple Dither</title>
+<style>
+/*
+  ═══════════════════════════════════════════════════════
+  STYLES
+  CSS controls how everything looks — colours, sizes,
+  spacing, animations. Think of it as the wardrobe and
+  interior design of the app. None of the logic lives here.
+  ═══════════════════════════════════════════════════════
+*/
+
+/* Pull in two fonts from Google's free font library.
+   DM Mono is the workhorse body font; Unbounded is used
+   only for the big title wordmark. */
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400&family=Unbounded:wght@200;400&display=swap');
+
+/* A blanket reset — browsers add their own default padding
+   and margins that we don't want, so this wipes the slate clean. */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+/* CSS variables — essentially named constants so we can
+   change a colour in one place and have it update everywhere. */
+:root {
+  --bg:#0a0a0a;           /* near-black page background */
+  --panel:rgba(10,10,10,0.78);  /* semi-transparent panel behind the controls */
+  --popup:rgba(14,14,14,0.97);  /* the floating popup menus, slightly more opaque */
+  --border:rgba(255,255,255,0.08);   /* very subtle white borders */
+  --border2:rgba(255,255,255,0.14);  /* slightly more visible borders */
+  --muted:rgba(255,255,255,0.3);     /* dimmed white for labels */
+  --accent:#e8e8e8;                  /* bright white for active/important text */
+  --track:rgba(255,255,255,0.1);     /* the thin line the slider thumb sits on */
+}
+
+/* Make the page fill the whole browser window with no scrollbar.
+   The background colour shows through before any image is loaded. */
+html,body{width:100%;height:100%;background:var(--bg);overflow:hidden;font-family:'DM Mono',monospace;color:var(--accent);}
+
+/* The canvas where the dithered result is displayed as a full-screen background.
+   It starts invisible (opacity 0) and fades in once the first render is done.
+   'image-rendering: pixelated' tells the browser NOT to smooth the pixels when
+   scaling up — we want that crisp, blocky look. */
+#bg-canvas{position:fixed;inset:0;width:100%;height:100%;opacity:0;transition:opacity 1.2s cubic-bezier(.4,0,.2,1);z-index:0;image-rendering:pixelated;}
+#bg-canvas.visible{opacity:1}
+
+/* A dark gradient that sits on top of the canvas image, making the
+   UI controls easier to read against a bright image. */
+.bg-overlay{position:fixed;inset:0;background:linear-gradient(135deg,rgba(0,0,0,.55) 0%,rgba(0,0,0,.2) 100%);z-index:1;pointer-events:none;opacity:0;transition:opacity 1.2s ease;}
+.bg-overlay.visible{opacity:1}
+
+/* The outer container that centres the control panel on screen.
+   'display:flex' with align/justify center is the easiest way to do this. */
+.ui{position:fixed;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;}
+
+/* The frosted-glass control panel.
+   'backdrop-filter: blur' creates the frosted glass effect by blurring
+   whatever is visible behind the element — the dithered image in this case. */
+.panel{
+  width:320px;padding:30px 26px 24px;
+  background:var(--panel);border:1px solid var(--border);
+  backdrop-filter:blur(28px) saturate(1.3);-webkit-backdrop-filter:blur(28px) saturate(1.3);
+  border-radius:2px;display:flex;flex-direction:column;gap:20px;position:relative;
+}
+
+.wordmark{font-family:'Unbounded',sans-serif;font-weight:200;font-size:11px;letter-spacing:.35em;text-transform:uppercase;color:var(--muted);text-align:center;}
+
+/* The drag-and-drop upload area. The dashed border is a visual hint
+   that it's an interactive drop zone. */
+.upload-zone{height:70px;border:1px dashed rgba(255,255,255,.15);border-radius:1px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:border-color .2s,background .2s;overflow:hidden;}
+.upload-zone:hover{border-color:rgba(255,255,255,.4);background:rgba(255,255,255,.03)}
+.upload-zone.drag{border-color:rgba(255,255,255,.6);background:rgba(255,255,255,.06)}
+.upload-label{font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);pointer-events:none;transition:color .2s;text-align:center;line-height:1.9;}
+.upload-zone:hover .upload-label{color:var(--accent)}
+/* The actual file input is invisible — the upload-zone acts as a pretty
+   wrapper that triggers it when clicked. */
+#file-input{display:none}
+
+/* The three algorithm buttons (ordered / floyd-steinberg / atkinson).
+   They sit in a row sharing one border, making them look like one connected unit. */
+.algo-toggle{display:flex;border:1px solid var(--border);border-radius:1px;overflow:hidden;}
+.algo-btn{flex:1;padding:7px 0;background:transparent;border:none;color:var(--muted);font-family:'DM Mono',monospace;font-size:8px;letter-spacing:.18em;text-transform:uppercase;cursor:pointer;transition:background .15s,color .15s;}
+.algo-btn:not(:last-child){border-right:1px solid var(--border)}
+.algo-btn.active{background:rgba(255,255,255,.08);color:var(--accent)}
+.algo-btn:hover:not(.active){color:rgba(255,255,255,.6)}
+
+/* Slider layout */
+.sliders{display:flex;flex-direction:column;gap:15px}
+.slider-row{display:flex;flex-direction:column;gap:7px}
+.slider-meta{display:flex;justify-content:space-between;align-items:baseline}
+.slider-name{font-size:9px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted)}
+.slider-val{font-size:9px;letter-spacing:.05em;color:var(--accent);min-width:34px;text-align:right}
+
+/* Custom-styled range sliders. Browsers render these very differently by
+   default, so we strip all native styling and build our own.
+   The 'thumb' is the draggable circle; the 'track' is the line it slides along. */
+input[type=range]{-webkit-appearance:none;width:100%;height:1px;background:var(--track);outline:none;cursor:pointer;}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;border-radius:50%;background:#fff;cursor:pointer;transition:transform .15s,box-shadow .15s;}
+input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.4);box-shadow:0 0 0 3px rgba(255,255,255,.12)}
+input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;background:#fff;border:none;cursor:pointer;}
+
+/* The row of four small buttons that open popup menus.
+   'position:relative' is important — the popups use this as their
+   positioning anchor (they pop UP from here). */
+.popup-row{display:flex;gap:5px;position:relative;}
+.popup-trigger{
+  flex:1;padding:7px 0;background:transparent;border:1px solid var(--border);border-radius:1px;
+  color:var(--muted);font-family:'DM Mono',monospace;font-size:8px;letter-spacing:.18em;
+  text-transform:uppercase;cursor:pointer;transition:border-color .15s,color .15s,background .15s;
+  position:relative;
+}
+.popup-trigger:hover{border-color:var(--border2);color:rgba(255,255,255,.6)}
+.popup-trigger.open{border-color:rgba(255,255,255,.32);color:var(--accent);background:rgba(255,255,255,.06)}
+/* A tiny dot indicator that appears on the button when any setting inside
+   that popup has been changed from its default. */
+.pip{position:absolute;top:4px;right:5px;width:4px;height:4px;border-radius:50%;background:rgba(255,255,255,.55);display:none;}
+.popup-trigger.dirty .pip{display:block}
+
+/* Popups are hidden by default (display:none) and shown by adding
+   the 'open' class via JavaScript. They anchor to the bottom of the
+   popup-row and float upward. */
+.popup{
+  position:absolute;left:0;right:0;bottom:calc(100% + 8px);
+  background:var(--popup);border:1px solid var(--border2);
+  backdrop-filter:blur(32px);-webkit-backdrop-filter:blur(32px);
+  border-radius:2px;padding:18px 18px 16px;
+  display:none;flex-direction:column;gap:14px;z-index:100;
+}
+.popup.open{display:flex}
+.popup-title{font-size:8px;letter-spacing:.3em;text-transform:uppercase;color:var(--muted);padding-bottom:2px;border-bottom:1px solid var(--border);}
+
+/* Custom toggle switch — built from a hidden checkbox, a visible
+   rounded track, and a circular thumb that slides left/right.
+   The ~ selector means "sibling of" — when the checkbox is checked,
+   style the track and thumb that follow it. */
+.toggle-row{display:flex;justify-content:space-between;align-items:center;}
+.toggle-label{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+.toggle{position:relative;width:30px;height:16px;cursor:pointer;flex-shrink:0;}
+.toggle input{display:none}
+.ttrack{position:absolute;inset:0;background:rgba(255,255,255,.1);border-radius:8px;transition:background .2s;border:1px solid rgba(255,255,255,.1);}
+.toggle input:checked~.ttrack{background:rgba(255,255,255,.28);border-color:rgba(255,255,255,.3)}
+.tthumb{position:absolute;top:2px;left:2px;width:10px;height:10px;background:#fff;border-radius:50%;transition:left .2s;}
+.toggle input:checked~.tthumb{left:16px}
+
+/* Colour swatch — a small clickable rectangle that opens the browser's
+   native colour picker. The input is stretched to fill the swatch box. */
+.swatch{position:relative;width:26px;height:16px;border:1px solid rgba(255,255,255,.18);border-radius:1px;overflow:hidden;cursor:pointer;flex-shrink:0;}
+.swatch input[type=color]{position:absolute;inset:-4px;width:calc(100% + 8px);height:calc(100% + 8px);border:none;padding:0;cursor:pointer;}
+
+/* Segmented control — a row of buttons where only one can be active
+   at a time, like a radio button group but visually joined together. */
+.seg{display:flex;border:1px solid var(--border);border-radius:1px;overflow:hidden;}
+.seg-btn{flex:1;padding:6px 0;background:transparent;border:none;color:var(--muted);font-family:'DM Mono',monospace;font-size:8px;letter-spacing:.14em;text-transform:uppercase;cursor:pointer;transition:background .12s,color .12s;}
+.seg-btn:not(:last-child){border-right:1px solid var(--border)}
+.seg-btn.active{background:rgba(255,255,255,.08);color:var(--accent)}
+.seg-btn:hover:not(.active){color:rgba(255,255,255,.6)}
+
+/* The small gradient preview bar between the two tint colour swatches.
+   Its background is updated live by JavaScript as you pick colours. */
+.grad-bar{flex:1;height:5px;border-radius:3px;}
+
+.act-btn{width:100%;padding:8px 0;background:transparent;border:1px solid rgba(255,255,255,.12);border-radius:1px;color:var(--muted);font-family:'DM Mono',monospace;font-size:8px;letter-spacing:.22em;text-transform:uppercase;cursor:pointer;transition:background .14s,border-color .14s,color .14s;}
+.act-btn:hover{background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.3);color:var(--accent)}
+
+/* Status text and save button sit side by side at the bottom of the panel. */
+.bottom-row{display:flex;align-items:center;gap:10px}
+.status{flex:1;font-size:8px;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);}
+
+/* Two CSS animations used on the status text:
+   'blink' pulses the "processing…" text while the render runs.
+   'pulse' breathes the "animating" text while threshold animation is active. */
+@keyframes blink{0%,100%{opacity:.3}50%{opacity:1}}
+.status.processing{animation:blink .9s infinite}
+@keyframes pulse{0%,100%{opacity:.35}50%{opacity:.9}}
+.status.animating{animation:pulse 1.6s infinite}
+
+.save-btn{padding:8px 14px;background:transparent;border:1px solid rgba(255,255,255,.2);border-radius:1px;color:var(--accent);font-family:'DM Mono',monospace;font-size:8px;letter-spacing:.25em;text-transform:uppercase;cursor:pointer;transition:background .14s,border-color .14s;white-space:nowrap;}
+.save-btn:hover{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.45)}
+/* Disabled until an image has actually been rendered — no point offering
+   a save when there's nothing to save yet. */
+.save-btn:disabled{opacity:.28;cursor:default;pointer-events:none}
+
+/* A hidden off-screen canvas used as a scratch pad for pixel processing.
+   All the dithering math happens here before the result is painted to
+   the visible background canvas. */
+canvas#work{display:none}
+</style>
+</head>
+<body>
+
+<!--
+  ═══════════════════════════════════════════════════════
+  HTML STRUCTURE
+  Three layers stacked on top of each other using CSS:
+
+    [0] #bg-canvas  — the full-screen dithered image
+    [1] .bg-overlay — a dark gradient for legibility
+    [2] .ui         — the control panel the user interacts with
+
+  The invisible #work canvas is also here — it's the
+  off-screen scratch space where pixel math happens.
+  ═══════════════════════════════════════════════════════
+-->
+
+<!-- Layer 0: the visible background canvas. Starts invisible, fades in after first render. -->
+<canvas id="bg-canvas"></canvas>
+
+<!-- Layer 1: a subtle dark vignette overlay to keep UI readable over bright images. -->
+<div class="bg-overlay" id="bg-overlay"></div>
+
+<!-- Hidden scratch-pad canvas. We do all our pixel math here, then copy the result
+     to bg-canvas so the user sees it as the background. -->
+<canvas id="work"></canvas>
+
+<!-- Layer 2: the UI — everything the user sees and touches. -->
+<div class="ui">
+<div class="panel" id="panel">
+
+  <div class="wordmark">Simple Dither</div>
+
+  <!-- Upload drop zone — clicking this triggers the hidden file input below. -->
+  <div class="upload-zone" id="upload-zone">
+    <label class="upload-label" for="file-input">drop image here<br>or click to upload</label>
+    <input type="file" id="file-input" accept="image/*">
+  </div>
+
+  <!-- Algorithm selector — which dithering recipe to use. -->
+  <div class="algo-toggle">
+    <button class="algo-btn active" data-algo="ordered">ordered</button>
+    <button class="algo-btn" data-algo="floyd">floyd-steinberg</button>
+    <button class="algo-btn" data-algo="atkinson">atkinson</button>
+  </div>
+
+  <!-- The four main sliders always visible on the panel. -->
+  <div class="sliders">
+    <div class="slider-row">
+      <div class="slider-meta"><span class="slider-name">threshold</span><span class="slider-val" id="v-threshold">128</span></div>
+      <input type="range" id="sl-threshold" min="0" max="255" value="128">
+    </div>
+    <div class="slider-row">
+      <div class="slider-meta"><span class="slider-name">contrast</span><span class="slider-val" id="v-contrast">0</span></div>
+      <input type="range" id="sl-contrast" min="-100" max="100" value="0">
+    </div>
+    <div class="slider-row">
+      <div class="slider-meta"><span class="slider-name">scale</span><span class="slider-val" id="v-scale">1×</span></div>
+      <input type="range" id="sl-scale" min="1" max="8" value="1" step="1">
+    </div>
+    <div class="slider-row">
+      <div class="slider-meta"><span class="slider-name">noise</span><span class="slider-val" id="v-noise">0</span></div>
+      <input type="range" id="sl-noise" min="0" max="80" value="0">
+    </div>
+  </div>
+
+  <!-- ── POPUP MENUS ─────────────────────────────────────────────────── -->
+  <!-- Each popup is defined inside this row so it can position itself
+       relative to the row using CSS absolute positioning. -->
+  <div class="popup-row" id="popup-row">
+
+    <!-- VISUAL popup: colour, tint, invert, dot size -->
+    <button class="popup-trigger" data-popup="visual">visual<span class="pip"></span></button>
+    <div class="popup" id="popup-visual">
+      <div class="popup-title">Visual</div>
+      <div class="toggle-row">
+        <span class="toggle-label">invert</span>
+        <label class="toggle"><input type="checkbox" id="tog-invert"><span class="ttrack"></span><span class="tthumb"></span></label>
+      </div>
+      <div class="slider-row">
+        <div class="slider-meta"><span class="slider-name">dot size (bayer)</span><span class="slider-val" id="v-dotsize">8×8</span></div>
+        <div class="seg" id="seg-dotsize">
+          <button class="seg-btn" data-val="2">2</button>
+          <button class="seg-btn" data-val="4">4</button>
+          <button class="seg-btn active" data-val="8">8</button>
+          <button class="seg-btn" data-val="16">16</button>
+        </div>
+      </div>
+      <div class="slider-row">
+        <div class="slider-meta"><span class="slider-name">dark color</span></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <div class="swatch"><input type="color" id="col-dark" value="#000000"></div>
+          <span style="font-size:8px;color:var(--muted)">replaces black pixels</span>
+        </div>
+      </div>
+      <div class="slider-row">
+        <div class="slider-meta"><span class="slider-name">light color</span></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <div class="swatch"><input type="color" id="col-light" value="#ffffff"></div>
+          <span style="font-size:8px;color:var(--muted)">replaces white pixels</span>
+        </div>
+      </div>
+      <div class="slider-row">
+        <div class="slider-meta"><span class="slider-name">gradient tint</span><span class="slider-val" id="v-tint">0%</span></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <div class="swatch"><input type="color" id="tint-a" value="#ff3cac"></div>
+          <div class="grad-bar" id="grad-bar"></div>
+          <div class="swatch"><input type="color" id="tint-b" value="#2b86c5"></div>
+        </div>
+        <input type="range" id="sl-tint" min="0" max="100" value="0">
+      </div>
+    </div>
+
+    <!-- PRE-PROCESS popup: adjustments applied before dithering -->
+    <button class="popup-trigger" data-popup="preproc">pre-proc<span class="pip"></span></button>
+    <div class="popup" id="popup-preproc">
+      <div class="popup-title">Pre-process</div>
+      <div class="slider-row">
+        <div class="slider-meta"><span class="slider-name">brightness</span><span class="slider-val" id="v-brightness">0</span></div>
+        <input type="range" id="sl-brightness" min="-100" max="100" value="0">
+      </div>
+      <div class="slider-row">
+        <div class="slider-meta"><span class="slider-name">blur</span><span class="slider-val" id="v-blur">0</span></div>
+        <input type="range" id="sl-blur" min="0" max="12" value="0" step="0.5">
+      </div>
+      <div class="slider-row">
+        <div class="slider-meta"><span class="slider-name">zoom / crop</span><span class="slider-val" id="v-zoom">1.0×</span></div>
+        <input type="range" id="sl-zoom" min="1" max="4" value="1" step="0.05">
+      </div>
+    </div>
+
+    <!-- OUTPUT popup: export options -->
+    <button class="popup-trigger" data-popup="output">output<span class="pip"></span></button>
+    <div class="popup" id="popup-output">
+      <div class="popup-title">Output</div>
+      <div class="slider-row">
+        <div class="slider-meta"><span class="slider-name">export resolution</span><span class="slider-val" id="v-res">1×</span></div>
+        <div class="seg" id="seg-res">
+          <button class="seg-btn active" data-val="1">1×</button>
+          <button class="seg-btn" data-val="2">2×</button>
+          <button class="seg-btn" data-val="4">4×</button>
+        </div>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-label">transparent background</span>
+        <label class="toggle"><input type="checkbox" id="tog-transparent"><span class="ttrack"></span><span class="tthumb"></span></label>
+      </div>
+      <button class="act-btn" id="btn-copy">copy to clipboard</button>
+    </div>
+
+    <!-- CREATIVE popup: fun effects -->
+    <button class="popup-trigger" data-popup="creative">creative<span class="pip"></span></button>
+    <div class="popup" id="popup-creative">
+      <div class="popup-title">Creative</div>
+      <div class="toggle-row">
+        <span class="toggle-label">scanlines</span>
+        <label class="toggle"><input type="checkbox" id="tog-scanlines"><span class="ttrack"></span><span class="tthumb"></span></label>
+      </div>
+      <div class="slider-row" id="scanline-row" style="opacity:.3;pointer-events:none">
+        <div class="slider-meta"><span class="slider-name">scanline intensity</span><span class="slider-val" id="v-scanlines">40%</span></div>
+        <input type="range" id="sl-scanlines" min="5" max="90" value="40">
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-label">tile mode</span>
+        <label class="toggle"><input type="checkbox" id="tog-tile"><span class="ttrack"></span><span class="tthumb"></span></label>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-label">animate threshold</span>
+        <label class="toggle"><input type="checkbox" id="tog-animate"><span class="ttrack"></span><span class="tthumb"></span></label>
+      </div>
+      <button class="act-btn" id="btn-reseed">reseed noise ↺</button>
+    </div>
+
+  </div><!-- /popup-row -->
+
+  <!-- Status message + Save button -->
+  <div class="bottom-row">
+    <span class="status" id="status">awaiting image</span>
+    <button class="save-btn" id="save-btn" disabled>save</button>
+  </div>
+
+</div><!-- /panel -->
+</div><!-- /ui -->
+
+<script>
+/*
+  ═══════════════════════════════════════════════════════
+  JAVASCRIPT — THE BRAIN OF THE APP
+
+  This is where all the logic lives. It can be roughly
+  divided into five concerns:
+
+    1. UI wiring     — making sliders, toggles, buttons respond
+    2. Image loading — handling drag-and-drop / file picker
+    3. Pixel math    — the actual dithering algorithms
+    4. Rendering     — painting results to the canvas
+    5. Helpers       — small utility functions used everywhere
+
+  We'll walk through each section with comments.
+  ═══════════════════════════════════════════════════════
+*/
+
+
+// ─── 1. CANVAS & DOM REFERENCES ──────────────────────────────────────────────
+// 'getElementById' finds an HTML element by its id attribute and gives us
+// a JavaScript handle to it so we can read from or write to it.
+
+const bgCanvas  = document.getElementById('bg-canvas');  // visible full-screen canvas
+const bgCtx     = bgCanvas.getContext('2d');              // its 2D drawing context (the paintbrush)
+const work      = document.getElementById('work');        // hidden scratch-pad canvas
+const wCtx      = work.getContext('2d');                  // its paintbrush
+const bgOverlay = document.getElementById('bg-overlay'); // the dark vignette div
+const statusEl  = document.getElementById('status');     // the small status text
+const saveBtn   = document.getElementById('save-btn');   // the Save button
+
+
+// ─── 2. STATE VARIABLES ──────────────────────────────────────────────────────
+// These variables hold the current "state" of the app — think of them as the
+// app's memory. When a slider moves, we update a variable, then re-render.
+
+let currentImage = null;      // the image the user has uploaded (null = nothing loaded yet)
+let algo         = 'ordered'; // which dithering algorithm is currently selected
+let debounceTimer= null;      // used to avoid re-rendering on every single slider tick (explained below)
+let animRaf      = null;      // handle for the animation loop (so we can stop it)
+let animDir      = 1;         // direction the animated threshold is travelling: +1 = rising, -1 = falling
+let animThresh   = 128;       // current threshold value during animation
+let noiseSeed    = Math.random(); // a random starting point for the noise pattern
+let exportRes    = 1;         // export multiplier: 1 = screen size, 2 = double, 4 = quadruple
+let bayerSize    = 8;         // the ordered dithering grid size (2, 4, 8, or 16)
+
+
+// ─── 3. BAYER MATRICES ───────────────────────────────────────────────────────
+/*
+  A Bayer matrix is a pre-calculated grid of numbers used in "ordered" dithering.
+  Think of it as a fine mesh screen — like the ones used in newspaper printing.
+  Each pixel's brightness is compared against the threshold value at that grid
+  position. Pixels that beat the threshold become white; those that don't, black.
+
+  The different sizes (2×2, 4×4, 8×8, 16×16) give different dot patterns:
+  small matrices = coarser, more visible grid; large = finer, more subtle.
+
+  These values are a mathematical constant — you look them up, not calculate them.
+*/
+const BAYER = {
+  2:  [0,2,3,1],
+  4:  [0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5],
+  8:  [ 0,32, 8,40, 2,34,10,42,
+       48,16,56,24,50,18,58,26,
+       12,44, 4,36,14,46, 6,38,
+       60,28,52,20,62,30,54,22,
+        3,35,11,43, 1,33, 9,41,
+       51,19,59,27,49,17,57,25,
+       15,47, 7,39,13,45, 5,37,
+       63,31,55,23,61,29,53,21],
+  16: (() => {
+    // The 16×16 matrix can be generated mathematically from the 4×4 one,
+    // rather than typing out 256 numbers by hand. Each cell is determined
+    // by which 4×4 quadrant it's in, combined with its position within
+    // that quadrant — it's a recursive pattern.
+    const b4=[0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5];
+    const m=new Array(256);
+    for(let y=0;y<16;y++) for(let x=0;x<16;x++)
+      m[y*16+x]=b4[Math.floor(y/4)*4+Math.floor(x/4)]*16+b4[(y%4)*4+(x%4)];
+    return m;
+  })()
+};
+
+
+// ─── 4. IMAGE UPLOAD ─────────────────────────────────────────────────────────
+const uploadZone = document.getElementById('upload-zone');
+const fileInput  = document.getElementById('file-input');
+
+// When the user clicks the upload zone, trigger the hidden file picker.
+uploadZone.addEventListener('click', () => fileInput.click());
+
+// When a file is chosen via the picker, load it.
+fileInput.addEventListener('change', e => { if(e.target.files[0]) loadImg(e.target.files[0]); });
+
+// Drag-and-drop: 'dragover' fires continuously while dragging over the zone.
+// We must call preventDefault() to tell the browser "I'll handle this drop".
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault(); uploadZone.classList.remove('drag');
+  if(e.dataTransfer.files[0]) loadImg(e.dataTransfer.files[0]);
+});
+
+function loadImg(f) {
+  // createObjectURL creates a temporary local URL pointing to the file in memory.
+  // We give this URL to an Image element, which triggers it to load.
+  const url = URL.createObjectURL(f);
+  const img = new Image();
+  img.onload = () => {
+    currentImage = img;
+    URL.revokeObjectURL(url); // clean up the temporary URL once the image is loaded
+    schedule();               // kick off the first render
+  };
+  img.src = url;
+}
+
+
+// ─── 5. ALGORITHM TOGGLE ─────────────────────────────────────────────────────
+// When any algorithm button is clicked, remove 'active' from all of them,
+// add it to the clicked one, update our state variable, and re-render.
+document.querySelectorAll('.algo-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.algo-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active'); algo = b.dataset.algo; schedule();
+  });
+});
+
+
+// ─── 6. CORE SLIDERS ─────────────────────────────────────────────────────────
+// A lookup of how to format each slider's displayed value (the number shown next to it).
+const coreSL = {
+  threshold: v => Math.round(v),
+  contrast:  v => (v>0?'+':'')+Math.round(v), // show a '+' prefix for positive values
+  scale:     v => v+'×',
+  noise:     v => Math.round(v)
+};
+
+// Wire up each core slider: on any change, update its displayed value and schedule a render.
+Object.keys(coreSL).forEach(k => {
+  const sl = document.getElementById('sl-'+k);
+  const vl = document.getElementById('v-'+k);
+  sl.addEventListener('input', () => { vl.textContent = coreSL[k](sl.value); schedule(); });
+});
+
+// Shorthand helper: get the current numeric value of a slider by its key name.
+const gsl = k => parseFloat(document.getElementById('sl-'+k).value);
+
+
+// ─── 7. POPUP SYSTEM ─────────────────────────────────────────────────────────
+/*
+  Each popup button knows which popup to open via its data-popup attribute.
+  Clicking a button:
+    - closes any already-open popup first
+    - if that popup wasn't already open, opens it
+
+  Clicking anywhere outside the panel closes all popups.
+*/
+document.querySelectorAll('.popup-trigger').forEach(btn => {
+  btn.addEventListener('click', e => {
+    e.stopPropagation(); // prevent this click from also triggering the document listener below
+    const pop = document.getElementById('popup-'+btn.dataset.popup);
+    const wasOpen = pop.classList.contains('open');
+    closePopups();
+    if(!wasOpen){ pop.classList.add('open'); btn.classList.add('open'); }
+  });
+});
+
+// Close all popups when clicking outside the panel.
+document.addEventListener('click', e => { if(!e.target.closest('#panel')) closePopups(); });
+
+function closePopups(){
+  document.querySelectorAll('.popup').forEach(p => p.classList.remove('open'));
+  document.querySelectorAll('.popup-trigger').forEach(b => b.classList.remove('open'));
+}
+
+// Show or hide the small dot indicator on a popup button.
+// 'dirty' = true means "something in here has been changed from its default".
+function pip(id, dirty){
+  document.querySelector(`[data-popup="${id}"]`).classList.toggle('dirty', dirty);
+}
+
+
+// ─── 8. VISUAL POPUP CONTROLS ────────────────────────────────────────────────
+const togInvert = document.getElementById('tog-invert');
+togInvert.addEventListener('change', () => { checkVisualPip(); schedule(); });
+
+// Dot size segmented control: clicking a segment updates the Bayer grid size.
+document.querySelectorAll('#seg-dotsize .seg-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#seg-dotsize .seg-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active'); bayerSize = parseInt(b.dataset.val);
+    document.getElementById('v-dotsize').textContent = bayerSize+'×'+bayerSize;
+    checkVisualPip(); schedule();
+  });
+});
+
+// Dark/light colour pickers — these replace the black and white pixels
+// in the final output with custom colours.
+const colDark  = document.getElementById('col-dark');
+const colLight = document.getElementById('col-light');
+colDark.addEventListener('input',  () => { checkVisualPip(); schedule(); });
+colLight.addEventListener('input', () => { checkVisualPip(); schedule(); });
+
+// Gradient tint controls — a two-colour gradient painted over the dithered image.
+const tintA   = document.getElementById('tint-a');
+const tintB   = document.getElementById('tint-b');
+const slTint  = document.getElementById('sl-tint');
+const vTint   = document.getElementById('v-tint');
+const gradBar = document.getElementById('grad-bar');
+
+// Update the small preview bar between the two swatches whenever a colour changes.
+function updateGradBar(){ gradBar.style.background=`linear-gradient(to right,${tintA.value},${tintB.value})`; }
+updateGradBar();
+tintA.addEventListener('input',  () => { updateGradBar(); checkVisualPip(); schedule(); });
+tintB.addEventListener('input',  () => { updateGradBar(); checkVisualPip(); schedule(); });
+slTint.addEventListener('input', () => { vTint.textContent = slTint.value+'%'; checkVisualPip(); schedule(); });
+
+// Check whether any visual setting differs from its default, then update the pip dot.
+function checkVisualPip(){
+  pip('visual', togInvert.checked || bayerSize!==8 || colDark.value!=='#000000' || colLight.value!=='#ffffff' || +slTint.value>0);
+}
+
+
+// ─── 9. PRE-PROCESS POPUP CONTROLS ───────────────────────────────────────────
+// These adjustments are applied to the image BEFORE the dithering algorithm runs.
+// Brightness, blur, and zoom all change what the dithering algorithm "sees".
+const ppSL = {
+  brightness: v => (v>0?'+':'')+Math.round(v),
+  blur:       v => parseFloat(v).toFixed(1),
+  zoom:       v => parseFloat(v).toFixed(2)+'×'
+};
+Object.keys(ppSL).forEach(k => {
+  const sl = document.getElementById('sl-'+k);
+  const vl = document.getElementById('v-'+k);
+  sl.addEventListener('input', () => {
+    vl.textContent = ppSL[k](sl.value);
+    // Update the pip if any pre-process slider is non-default.
+    pip('preproc', +document.getElementById('sl-brightness').value!==0 ||
+                   +document.getElementById('sl-blur').value!==0 ||
+                   +document.getElementById('sl-zoom').value!==1);
+    schedule();
+  });
+});
+
+
+// ─── 10. OUTPUT POPUP CONTROLS ───────────────────────────────────────────────
+// Export resolution selector.
+document.querySelectorAll('#seg-res .seg-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#seg-res .seg-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active'); exportRes = parseInt(b.dataset.val);
+    document.getElementById('v-res').textContent = exportRes+'×';
+    pip('output', exportRes!==1 || togTransparent.checked);
+  });
+});
+
+const togTransparent = document.getElementById('tog-transparent');
+togTransparent.addEventListener('change', () => { pip('output', exportRes!==1||togTransparent.checked); schedule(); });
+
+// "Copy to clipboard" — converts the canvas to a PNG blob and writes it to the clipboard.
+// This uses the modern Clipboard API, which requires HTTPS or localhost to work.
+document.getElementById('btn-copy').addEventListener('click', async () => {
+  if(!currentImage) return;
+  const btn = document.getElementById('btn-copy');
+  try {
+    // toDataURL gives us a base64 string; fetch() converts it to a proper Blob.
+    const blob = await (await fetch(bgCanvas.toDataURL('image/png'))).blob();
+    await navigator.clipboard.write([new ClipboardItem({'image/png': blob})]);
+    btn.textContent='copied ✓'; setTimeout(()=>btn.textContent='copy to clipboard', 1600);
+  } catch(e){
+    btn.textContent='failed — try save'; setTimeout(()=>btn.textContent='copy to clipboard', 2000);
+  }
+});
+
+
+// ─── 11. CREATIVE POPUP CONTROLS ─────────────────────────────────────────────
+const togScanlines = document.getElementById('tog-scanlines');
+const scanlineRow  = document.getElementById('scanline-row');
+const slScanlines  = document.getElementById('sl-scanlines');
+const vScanlines   = document.getElementById('v-scanlines');
+const togTile      = document.getElementById('tog-tile');
+const togAnimate   = document.getElementById('tog-animate');
+
+// Show/hide the scanline intensity slider depending on whether scanlines are on.
+togScanlines.addEventListener('change', () => {
+  scanlineRow.style.opacity      = togScanlines.checked ? '1' : '.3';
+  scanlineRow.style.pointerEvents= togScanlines.checked ? 'auto' : 'none';
+  checkCreativePip(); schedule();
+});
+slScanlines.addEventListener('input', () => { vScanlines.textContent=slScanlines.value+'%'; checkCreativePip(); schedule(); });
+togTile.addEventListener('change',    () => { checkCreativePip(); schedule(); });
+
+// Animate toggle: start or stop the threshold animation loop.
+togAnimate.addEventListener('change', () => {
+  checkCreativePip();
+  if(togAnimate.checked) startAnim(); else stopAnim();
+});
+
+// Reseed: pick a new random number so the noise pattern changes completely.
+document.getElementById('btn-reseed').addEventListener('click', () => { noiseSeed = Math.random(); schedule(); });
+
+function checkCreativePip(){ pip('creative', togScanlines.checked||togTile.checked||togAnimate.checked); }
+
+
+// ─── 12. ANIMATION LOOP ──────────────────────────────────────────────────────
+/*
+  When "animate threshold" is on, instead of rendering once we run a continuous
+  loop that slowly sweeps the threshold value back and forth between ~38 and ~218.
+  This creates a pulsing, breathing effect.
+
+  requestAnimationFrame is the browser's preferred way to run smooth animations —
+  it fires roughly 60 times per second, perfectly in sync with the display refresh.
+*/
+function startAnim(){
+  animThresh = gsl('threshold'); // start from wherever the threshold slider currently sits
+  setStatus('animating','animating');
+  (function tick(){
+    if(!togAnimate.checked) return; // bail out if the toggle has been switched off
+    animThresh += animDir * 1.4;   // nudge the threshold up or down
+    if(animThresh >= 218) animDir = -1; // hit the top — reverse direction
+    if(animThresh <= 38)  animDir =  1; // hit the bottom — reverse direction
+    doRender(animThresh);
+    animRaf = requestAnimationFrame(tick); // schedule the next frame
+  })();
+}
+function stopAnim(){
+  if(animRaf) cancelAnimationFrame(animRaf); // cancel the pending frame
+  animRaf = null;
+  setStatus('','');
+}
+
+
+// ─── 13. SAVE ────────────────────────────────────────────────────────────────
+/*
+  Saving works by creating a fresh off-screen canvas at the desired export size,
+  drawing the dithered result onto it (scaled up if exportRes > 1), then converting
+  the canvas to a PNG data URL and triggering a fake anchor-link click to download it.
+*/
+saveBtn.addEventListener('click', () => {
+  if(!currentImage) return;
+  // Output dimensions match the original input image exactly (times the export
+  // resolution multiplier). The dithered 'work' canvas is scaled back up to fill
+  // this — so a scale-4 render will look blocky at full size, as expected.
+  const ow = currentImage.width  * exportRes;
+  const oh = currentImage.height * exportRes;
+
+  // Create the export canvas at the right size (not attached to the page).
+  const ec = Object.assign(document.createElement('canvas'), {width:ow, height:oh});
+  const ex = ec.getContext('2d');
+  ex.imageSmoothingEnabled = false; // keep pixels sharp, no blurring when scaling
+  ex.drawImage(work, 0, 0, ow, oh);
+
+  // Apply tint and scanlines to the export canvas too.
+  paintTint(ex, ow, oh);
+  paintScanlines(ex, ow, oh);
+
+  // Programmatically click an invisible download link to trigger the save dialog.
+  const a = document.createElement('a');
+  a.download = 'simple-dither.png';
+  a.href = ec.toDataURL('image/png');
+  a.click();
+});
+
+
+// ─── 14. DEBOUNCED SCHEDULING ────────────────────────────────────────────────
+/*
+  Dithering is CPU-intensive. If we re-rendered on every single mousemove event
+  while dragging a slider, the UI would stutter badly.
+
+  Instead, we use a "debounce": every time schedule() is called, we cancel any
+  pending render and restart a short timer. The render only actually fires once
+  the user stops moving the slider for 80ms. This keeps the UI snappy.
+*/
+function schedule(){
+  if(!currentImage || togAnimate.checked) return;
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => doRender(gsl('threshold')), 80);
+}
+
+
+// ─── 15. CORE RENDER FUNCTION ────────────────────────────────────────────────
+/*
+  This is the heart of the app. doRender() does four things in sequence:
+
+    A. Draw the source image onto the scratch canvas (with blur/zoom applied)
+    B. Convert every pixel to greyscale, applying brightness and contrast
+    C. Run the chosen dithering algorithm over the greyscale data
+    D. Paint the result to the background canvas (with tint and scanlines on top)
+*/
+function doRender(threshold){
+  if(!currentImage) return;
+  if(!togAnimate.checked) setStatus('processing','processing…');
+
+  // requestAnimationFrame ensures we don't start a render mid-draw, which would
+  // cause flickering. It hands control to the browser, which calls our function
+  // at the next safe moment before painting the screen.
+  requestAnimationFrame(() => {
+
+    // ── A. Gather all current settings ───────────────────────────────────────
+    const scale       = gsl('scale');
+    const contrast    = gsl('contrast');
+    const noise       = gsl('noise');
+    const brightness  = gsl('brightness');
+    const blurVal     = gsl('blur');
+    const zoom        = gsl('zoom');
+    const invert      = togInvert.checked;
+    const transparent = togTransparent.checked;
+    const [dR,dG,dB]  = h2rgb(colDark.value);  // RGB components of the "dark" colour
+    const [lR,lG,lB]  = h2rgb(colLight.value); // RGB components of the "light" colour
+
+    // Calculate the working size: the image scaled down by the 'scale' slider.
+    // A scale of 4 means we process at 1/4 resolution — large, blocky pixels.
+    const iw = currentImage.width, ih = currentImage.height;
+    const sw = Math.max(1, Math.floor(iw / scale)); // working width in pixels
+    const sh = Math.max(1, Math.floor(ih / scale)); // working height in pixels
+    work.width = sw; work.height = sh;
+
+    // ── B. Draw image to scratch canvas with blur and zoom ───────────────────
+    // CSS filter blur is the easiest way to blur — we just apply it to the canvas
+    // context before drawing, then clear it after.
+    if(blurVal > 0) wCtx.filter = `blur(${blurVal}px)`; else wCtx.filter = 'none';
+
+    // Zoom works by cropping the image from the centre.
+    // zoom=2 means we only draw the middle 50% of the image, stretched to fill.
+    const cw = iw / zoom, ch = ih / zoom;
+    wCtx.drawImage(currentImage, (iw-cw)/2, (ih-ch)/2, cw, ch, 0, 0, sw, sh);
+    wCtx.filter = 'none';
+
+    // ── C. Read pixels and convert to greyscale ───────────────────────────────
+    // getImageData returns a flat array of pixel data: [R, G, B, A, R, G, B, A, ...]
+    // where each group of four numbers describes one pixel's colour.
+    const imgd = wCtx.getImageData(0, 0, sw, sh).data;
+
+    // We store each pixel's brightness as a single float (not 4 values).
+    const gray = new Float32Array(sw * sh);
+
+    for(let i = 0; i < sw*sh; i++){
+      // Standard luminance formula — human eyes are most sensitive to green,
+      // less so to red, and least sensitive to blue.
+      let lum = 0.299*imgd[i*4] + 0.587*imgd[i*4+1] + 0.114*imgd[i*4+2];
+
+      // Apply brightness offset (just add or subtract a fixed amount).
+      lum = Math.max(0, Math.min(255, lum + brightness*2.55));
+
+      // Apply contrast (a standard photographic S-curve formula).
+      if(contrast !== 0) lum = adjContrast(lum, contrast*2.55);
+
+      gray[i] = lum;
+    }
+
+    // ── D. Run the dithering algorithm ────────────────────────────────────────
+    const bayer = BAYER[bayerSize], bMax = bayerSize * bayerSize;
+    const out   = new Uint8ClampedArray(sw * sh * 4); // output pixel buffer, RGBA per pixel
+
+    // Initialise the seeded random number generator.
+    // Using a seed means the noise pattern is stable between renders —
+    // only changes when the user hits "reseed".
+    const rng = mulberry32(noiseSeed * 2**32 | 0);
+
+    if(algo === 'ordered'){
+      /*
+        ORDERED DITHERING (Bayer / halftone)
+        ─────────────────────────────────────
+        For each pixel we look up a "threshold modifier" from the Bayer matrix.
+        The matrix is tiled across the whole image. Pixels whose brightness
+        beats (threshold + modifier) become light; the rest become dark.
+        This creates the classic dot-grid/halftone pattern.
+      */
+      for(let y = 0; y < sh; y++) for(let x = 0; x < sw; x++){
+        const i  = y*sw + x;
+        // Look up this pixel's position in the tiled Bayer matrix.
+        const bv = (bayer[(y % bayerSize)*bayerSize + (x % bayerSize)] / bMax) * 255;
+        const n  = noise > 0 ? (rng() - 0.5) * noise : 0; // optional random jitter
+        let v = (gray[i] + n) > (threshold - 128 + bv) ? 255 : 0;
+        if(invert) v = 255 - v; // flip black↔white if invert is on
+        const [r,g,b] = v === 0 ? [dR,dG,dB] : [lR,lG,lB]; // substitute custom colours
+        out[i*4]=r; out[i*4+1]=g; out[i*4+2]=b;
+        out[i*4+3] = transparent ? (v===0 ? 255 : 0) : 255; // alpha: 0 = fully transparent
+      }
+
+    } else if(algo === 'floyd'){
+      /*
+        FLOYD-STEINBERG ERROR DIFFUSION
+        ────────────────────────────────
+        Instead of a fixed pattern, this algorithm "diffuses" the rounding error
+        from each pixel decision to its neighbours. If a pixel's brightness is
+        e.g. 180 and we round it to white (255), we were 75 units too generous —
+        so we subtract that error from the pixels to the right and below,
+        making them slightly darker to compensate. The result looks smoother
+        and more organic than ordered dithering.
+
+        The fractions (7/16, 3/16, 5/16, 1/16) control how the error is spread
+        in a cross pattern:
+                    [current] [+7/16]
+          [+3/16]   [+5/16]   [+1/16]
+      */
+      const g = gray.slice(); // work on a copy so we can modify it in-place
+      for(let y = 0; y < sh; y++) for(let x = 0; x < sw; x++){
+        const i   = y*sw + x;
+        const old = g[i] + (noise > 0 ? (rng()-0.5)*noise : 0);
+        let nv    = old > threshold ? 255 : 0;
+        const err = old - nv; // how wrong was our rounding?
+        if(invert) nv = 255 - nv;
+        // Spread the error to neighbouring pixels (if they exist).
+        if(x+1 < sw)           g[i+1]    += err * 7/16;
+        if(y+1 < sh){
+          if(x-1 >= 0)         g[i+sw-1] += err * 3/16;
+                                g[i+sw]   += err * 5/16;
+          if(x+1 < sw)         g[i+sw+1] += err * 1/16;
+        }
+        const [r,gg,b] = nv===0 ? [dR,dG,dB] : [lR,lG,lB];
+        out[i*4]=r; out[i*4+1]=gg; out[i*4+2]=b;
+        out[i*4+3] = transparent ? (nv===0 ? 255 : 0) : 255;
+      }
+
+    } else {
+      /*
+        ATKINSON DITHERING
+        ───────────────────
+        Invented by Bill Atkinson at Apple for the original Macintosh (1984).
+        Similar to Floyd-Steinberg but spreads the error to 6 neighbours instead
+        of 4, and only diffuses 6/8 of the total error (keeping 2/8 "absorbed").
+        This gives a slightly lighter, crisper look — it was designed to suit
+        the Mac's 1-bit black-and-white screen.
+
+        Error pattern:
+                   [current] [+1/8] [+1/8]
+          [+1/8]   [+1/8]   [+1/8]
+                   [+1/8]
+      */
+      const g = gray.slice();
+      for(let y = 0; y < sh; y++) for(let x = 0; x < sw; x++){
+        const i   = y*sw + x;
+        const old = g[i] + (noise > 0 ? (rng()-0.5)*noise : 0);
+        let nv    = old > threshold ? 255 : 0;
+        const err = (old - nv) / 8; // divide by 8; we spread to 6 of those eighths
+        if(invert) nv = 255 - nv; g[i] = nv;
+        [[x+1,y],[x+2,y],[x-1,y+1],[x,y+1],[x+1,y+1],[x,y+2]].forEach(([nx,ny])=>{
+          if(nx>=0 && nx<sw && ny>=0 && ny<sh) g[ny*sw+nx] += err;
+        });
+        const [r,gg,b] = nv===0 ? [dR,dG,dB] : [lR,lG,lB];
+        out[i*4]=r; out[i*4+1]=gg; out[i*4+2]=b;
+        out[i*4+3] = transparent ? (nv===0 ? 255 : 0) : 255;
+      }
+    }
+
+    // Write the completed pixel buffer back into the scratch canvas.
+    wCtx.putImageData(new ImageData(out, sw, sh), 0, 0);
+
+    // ── E. Paint result to the visible background canvas ─────────────────────
+    bgCanvas.width  = window.innerWidth;
+    bgCanvas.height = window.innerHeight;
+    bgCtx.imageSmoothingEnabled = false; // stay sharp — no bilinear smoothing
+    bgCtx.clearRect(0, 0, bgCanvas.width, bgCanvas.height);
+
+    if(togTile.checked){
+      // Tile mode: repeat the dithered image like a wallpaper pattern.
+      bgCtx.fillStyle = bgCtx.createPattern(work, 'repeat');
+      bgCtx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+    } else {
+      // Normal mode: stretch the result to fill the screen.
+      bgCtx.drawImage(work, 0, 0, bgCanvas.width, bgCanvas.height);
+    }
+
+    // Layer the gradient tint on top.
+    paintTint(bgCtx, bgCanvas.width, bgCanvas.height);
+    // Layer the scanlines on top of that.
+    paintScanlines(bgCtx, bgCanvas.width, bgCanvas.height);
+
+    // Fade the canvas and overlay in (they start at opacity 0).
+    bgCanvas.classList.add('visible');
+    bgOverlay.classList.add('visible');
+    saveBtn.disabled = false;
+
+    if(!togAnimate.checked){ setStatus('','rendered'); setTimeout(()=>setStatus('',''), 1400); }
+  });
+}
+
+
+// ─── 16. PAINT HELPERS ───────────────────────────────────────────────────────
+
+// Paints a semi-transparent diagonal gradient over the entire canvas.
+// globalAlpha controls the overall opacity; the gradient itself defines the colours.
+function paintTint(ctx, w, h){
+  const op = +slTint.value / 100;
+  if(op <= 0) return; // nothing to do if tint opacity is zero
+  const g = ctx.createLinearGradient(0, 0, w, h);
+  g.addColorStop(0, rgba(tintA.value, op));
+  g.addColorStop(1, rgba(tintB.value, op));
+  ctx.globalAlpha = op; ctx.fillStyle = g; ctx.fillRect(0, 0, w, h); ctx.globalAlpha = 1;
+}
+
+// Draws thin horizontal black lines every 2 pixels to simulate a CRT scanline effect.
+// It skips every other row (y+=2), leaving the rows in between untouched.
+function paintScanlines(ctx, w, h){
+  if(!togScanlines.checked) return;
+  const op = +slScanlines.value / 100 * 0.75;
+  ctx.globalAlpha = op; ctx.fillStyle = '#000';
+  for(let y = 1; y < h; y += 2) ctx.fillRect(0, y, w, 1);
+  ctx.globalAlpha = 1;
+}
+
+
+// ─── 17. UTILITY FUNCTIONS ───────────────────────────────────────────────────
+
+// Standard photographic contrast formula. The factor 'f' compresses or expands
+// the tonal range around the midpoint (128).
+function adjContrast(v, c){
+  const f = (259*(c+255)) / (255*(259-c));
+  return Math.max(0, Math.min(255, f*(v-128)+128));
+}
+
+// Convert a hex colour string like "#ff3cac" to an [R, G, B] array.
+// We parse two hex characters at a time, starting after the '#'.
+function h2rgb(h){ return [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)]; }
+
+// Build an rgba() CSS colour string from a hex value plus an alpha (0-1).
+function rgba(h, a){ const [r,g,b]=h2rgb(h); return `rgba(${r},${g},${b},${a})`; }
+
+// Update the small status text in the bottom-left of the panel.
+function setStatus(cls, txt){ statusEl.className='status '+cls; statusEl.textContent=txt; }
+
+/*
+  Mulberry32 — a fast, seeded pseudo-random number generator.
+
+  JavaScript's built-in Math.random() is fine for most things, but it can't be
+  seeded — you can't ask for "the same sequence of random numbers as last time".
+  That matters here because we want the noise pattern to stay stable as you
+  adjust other sliders. Only clicking "reseed" should change it.
+
+  Mulberry32 takes a seed integer and returns a function that, each time you
+  call it, produces the next number in a deterministic sequence.
+  The bitwise operations (|, >>>, ^, Math.imul) are a known fast hashing trick.
+*/
+function mulberry32(seed){
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed>>>15, 1|seed);
+    t = t + Math.imul(t ^ t>>>7, 61|t) ^ t;
+    return ((t ^ t>>>14) >>> 0) / 4294967296; // normalise to 0–1 range
+  };
+}
+
+// Re-render whenever the browser window is resized, so the dithered background
+// always fills the new dimensions correctly.
+window.addEventListener('resize', () => {
+  if(currentImage && !togAnimate.checked) doRender(gsl('threshold'));
+});
+</script>
+</body>
+</html>
