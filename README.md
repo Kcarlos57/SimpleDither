@@ -1,6 +1,6 @@
 # Simple Dither
 
-A single-file, zero-dependency browser tool for dithering images. Upload a photo, adjust the controls, and the processed result becomes the full-screen background. Everything runs locally in the browser — no server, no uploads, no build step.
+A single-file, zero-dependency browser tool for dithering images. Upload a photo, adjust the controls, and the processed result becomes the full-screen background. Everything runs locally in the browser.
 
 ---
 
